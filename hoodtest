@@ -1,0 +1,283 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+local FOV_RADIUS = 50
+local PREDICTION_FACTOR = 0.11
+local SMOOTHNESS = 0.25
+
+local function applyForceFieldGreen(part: Instance)
+	if part:IsA("BasePart") or part:IsA("MeshPart") then
+		part.Material = Enum.Material.ForceField
+		part.Color = Color3.fromRGB(0, 255, 0)
+	end
+end
+
+local function watchModel(model: Instance)
+	for _, descendant in ipairs(model:GetDescendants()) do
+		applyForceFieldGreen(descendant)
+	end
+
+	model.DescendantAdded:Connect(function(descendant)
+		applyForceFieldGreen(descendant)
+	end)
+end
+
+local function setupViewModelTracking(viewmodelFolder: Instance)
+	local function checkAndWatch(child: Instance)
+		if child:IsA("Model") then
+			watchModel(child)
+			for _, subChild in ipairs(child:GetDescendants()) do
+				if subChild:IsA("Model") then
+					watchModel(subChild)
+				end
+			end
+		end
+	end
+
+	for _, child in ipairs(viewmodelFolder:GetChildren()) do
+		checkAndWatch(child)
+	end
+
+	viewmodelFolder.ChildAdded:Connect(checkAndWatch)
+end
+
+local viewmodelFolder = Camera:FindFirstChild("Viewmodel")
+if viewmodelFolder then
+	setupViewModelTracking(viewmodelFolder)
+end
+
+Camera.ChildAdded:Connect(function(child)
+	if child.Name == "Viewmodel" then
+		setupViewModelTracking(child)
+	end
+end)
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "VisualOverlayGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local fovCircle = Instance.new("Frame")
+fovCircle.Name = "FOVCircle"
+fovCircle.Size = UDim2.fromOffset(FOV_RADIUS * 2, FOV_RADIUS * 2)
+fovCircle.Position = UDim2.fromScale(0.5, 0.5)
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.BackgroundTransparency = 1
+fovCircle.Parent = screenGui
+
+local uiCorner = Instance.new("UICorner")
+uiCorner.CornerRadius = UDim.new(1, 0)
+uiCorner.Parent = fovCircle
+
+local uiStroke = Instance.new("UIStroke")
+uiStroke.Color = Color3.fromRGB(0, 255, 0)
+uiStroke.Thickness = 1.5
+uiStroke.Transparency = 0.2
+uiStroke.Parent = fovCircle
+
+local espDrawings = {}
+
+local function createESP(player: Player)
+	local drawings = {}
+
+	drawings.Box = Drawing.new("Square")
+	drawings.Box.Visible = false
+	drawings.Box.Color = Color3.fromRGB(255, 255, 255)
+	drawings.Box.Thickness = 1.5
+	drawings.Box.Filled = false
+
+	drawings.NameText = Drawing.new("Text")
+	drawings.NameText.Visible = false
+	drawings.NameText.Color = Color3.fromRGB(255, 255, 255)
+	drawings.NameText.Size = 14
+	drawings.NameText.Center = true
+	drawings.NameText.Outline = true
+
+	drawings.HealthBarBg = Drawing.new("Square")
+	drawings.HealthBarBg.Visible = false
+	drawings.HealthBarBg.Color = Color3.fromRGB(0, 0, 0)
+	drawings.HealthBarBg.Thickness = 1
+	drawings.HealthBarBg.Filled = true
+
+	drawings.HealthBarFill = Drawing.new("Square")
+	drawings.HealthBarFill.Visible = false
+	drawings.HealthBarFill.Color = Color3.fromRGB(0, 255, 0)
+	drawings.HealthBarFill.Thickness = 1
+	drawings.HealthBarFill.Filled = true
+
+	espDrawings[player] = drawings
+end
+
+local function removeESP(player: Player)
+	if espDrawings[player] then
+		for _, drawing in pairs(espDrawings[player]) do
+			drawing:Remove()
+		end
+		espDrawings[player] = nil
+	end
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+	if player ~= LocalPlayer then
+		createESP(player)
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	if player ~= LocalPlayer then
+		createESP(player)
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	removeESP(player)
+end)
+
+local lockedTarget: Player? = nil
+local isHoldingRMB = false
+local smoothedHealth: {[Player]: number} = {}
+
+local function isTargetValid(player: Player?): boolean
+	if not player or not player.Parent then return false end
+	local character = player.Character
+	if not character then return false end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local head = character:FindFirstChild("Head")
+	if not humanoid or humanoid.Health <= 0 or not head then return false end
+	return true
+end
+
+local function getClosestPlayerInFOV(): Player?
+	local closestPlayer: Player? = nil
+	local shortestDistance = FOV_RADIUS
+	local mousePos = UserInputService:GetMouseLocation()
+	local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and isTargetValid(player) then
+			local head = player.Character.Head
+			local screenPoint, onScreen = Camera:WorldToViewportPoint(head.Position)
+
+			if onScreen then
+				local targetScreenPos = Vector2.new(screenPoint.X, screenPoint.Y)
+				local distFromCenter = (targetScreenPos - screenCenter).Magnitude
+				if distFromCenter <= FOV_RADIUS then
+					local distFromCursor = (targetScreenPos - mousePos).Magnitude
+					if distFromCursor < shortestDistance then
+						shortestDistance = distFromCursor
+						closestPlayer = player
+					end
+				end
+			end
+		end
+	end
+
+	return closestPlayer
+end
+
+UserInputService.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		isHoldingRMB = true
+		lockedTarget = getClosestPlayerInFOV()
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		isHoldingRMB = false
+		lockedTarget = nil
+	end
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	if isHoldingRMB then
+		if not isTargetValid(lockedTarget) then
+			lockedTarget = getClosestPlayerInFOV()
+		end
+
+		if isTargetValid(lockedTarget) then
+			local character = lockedTarget.Character
+			local head = character.Head
+			local rootPart = character:FindFirstChild("HumanoidRootPart") or head
+			
+			local velocity = rootPart.AssemblyLinearVelocity
+			local predictedPosition = head.Position + (velocity * PREDICTION_FACTOR)
+			
+			local targetCFrame = CFrame.lookAt(Camera.CFrame.Position, predictedPosition)
+			Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, math.clamp(SMOOTHNESS * (dt * 60), 0, 1))
+		else
+			lockedTarget = nil
+		end
+	end
+
+	for player, drawings in pairs(espDrawings) do
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local rootPart = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
+
+		if character and humanoid and humanoid.Health > 0 and rootPart then
+			local humRootScreen, onScreen = Camera:WorldToViewportPoint(rootPart.Position)
+
+			if onScreen then
+				local head = character:FindFirstChild("Head")
+				local topPos = head and head.Position + Vector3.new(0, 0.5, 0) or (rootPart.Position + Vector3.new(0, 3, 0))
+				local bottomPos = rootPart.Position - Vector3.new(0, 3, 0)
+
+				local topScreen = Camera:WorldToViewportPoint(topPos)
+				local bottomScreen = Camera:WorldToViewportPoint(bottomPos)
+
+				local boxHeight = math.abs(bottomScreen.Y - topScreen.Y)
+				local boxWidth = boxHeight / 2
+
+				local boxPosition = Vector2.new(humRootScreen.X - boxWidth / 2, topScreen.Y)
+				local boxSize = Vector2.new(boxWidth, boxHeight)
+
+				drawings.Box.Visible = true
+				drawings.Box.Position = boxPosition
+				drawings.Box.Size = boxSize
+
+				drawings.NameText.Visible = true
+				drawings.NameText.Text = player.Name
+				drawings.NameText.Position = Vector2.new(boxPosition.X + boxSize.X / 2, boxPosition.Y - 18)
+
+				local currentHealth = humanoid.Health
+				local maxHealth = math.max(humanoid.MaxHealth, 1)
+				local healthPercent = math.clamp(currentHealth / maxHealth, 0, 1)
+
+				if not smoothedHealth[player] then
+					smoothedHealth[player] = healthPercent
+				end
+				smoothedHealth[player] += (healthPercent - smoothedHealth[player]) * math.clamp(dt * 10, 0, 1)
+
+				local barWidth = 4
+				local barHeight = boxSize.Y
+				local barPosition = Vector2.new(boxPosition.X - barWidth - 4, boxPosition.Y)
+
+				drawings.HealthBarBg.Visible = true
+				drawings.HealthBarBg.Position = barPosition
+				drawings.HealthBarBg.Size = Vector2.new(barWidth, barHeight)
+
+				local fillHeight = barHeight * smoothedHealth[player]
+				drawings.HealthBarFill.Visible = true
+				drawings.HealthBarFill.Position = Vector2.new(barPosition.X, barPosition.Y + (barHeight - fillHeight))
+				drawings.HealthBarFill.Size = Vector2.new(barWidth, fillHeight)
+				drawings.HealthBarFill.Color = Color3.fromRGB(255 * (1 - smoothedHealth[player]), 255 * smoothedHealth[player], 0)
+			else
+				drawings.Box.Visible = false
+				drawings.NameText.Visible = false
+				drawings.HealthBarBg.Visible = false
+				drawings.HealthBarFill.Visible = false
+			end
+		else
+			drawings.Box.Visible = false
+			drawings.NameText.Visible = false
+			drawings.HealthBarBg.Visible = false
+			drawings.HealthBarFill.Visible = false
+		end
+	end
+end)
